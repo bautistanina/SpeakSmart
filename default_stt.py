@@ -1,6 +1,5 @@
 import tkinter as tk
-from tkinter import scrolledtext, ttk, messagebox
-import ttkbootstrap as tb
+from tkinter import scrolledtext, messagebox
 import azure.cognitiveservices.speech as speechsdk
 import threading
 import pyaudio
@@ -10,11 +9,14 @@ from nltk.corpus import stopwords
 import spacy
 import requests
 import json
-from ui import create_ui  # Import the UI creation function
+import language_tool_python
+from ui import create_ui
+from textstat import flesch_reading_ease, flesch_kincaid_grade
+import time
 
-# Initialize NLTK resources (uncomment if not already downloaded)
-nltk.download('punkt')
-nltk.download('stopwords')
+# Initialize NLTK resources
+# nltk.download('punkt')
+# nltk.download('stopwords')
 
 # Load spaCy language model
 nlp = spacy.load("en_core_web_sm")
@@ -34,7 +36,7 @@ class SpeechToTextApp:
         
         # Initialize speech config
         self.speech_config = speechsdk.SpeechConfig(subscription=self.subscription_key, region=self.region)
-        self.speech_config.speech_recognition_language = "fil-PH"  # Set language to Filipino (Tagalog)
+        self.speech_config.speech_recognition_language = "en-US"  # Set language to English
 
         # Event handlers for speech recognition
         self.speech_recognizer = None
@@ -44,23 +46,25 @@ class SpeechToTextApp:
         self.recording_event = threading.Event()
         self.thread = None
 
+        # Timer and text storage
+        self.start_time = None
+        self.recognized_text = []
+
     def get_microphones(self):
         p = pyaudio.PyAudio()
-        mic_list = []
-        for i in range(p.get_device_count()):
-            mic_list.append(p.get_device_info_by_index(i).get('name'))
+        mic_list = [p.get_device_info_by_index(i).get('name') for i in range(p.get_device_count())]
         p.terminate()
         return mic_list
 
     def get_microphone_device_id(self, mic_name):
         p = pyaudio.PyAudio()
+        device_id = None
         for i in range(p.get_device_count()):
             if p.get_device_info_by_index(i).get('name') == mic_name:
                 device_id = p.get_device_info_by_index(i).get('index')
-                p.terminate()
-                return device_id
+                break
         p.terminate()
-        return None
+        return device_id
 
     def start_recording(self):
         self.result_text.delete(1.0, tk.END)
@@ -69,18 +73,35 @@ class SpeechToTextApp:
         self.stop_button.config(state=tk.NORMAL)
         self.recording = True
         self.recording_event.clear()
+        self.recognized_text.clear()
 
         # Start a new thread for streaming recognition
         self.thread = threading.Thread(target=self.stream_recognition)
         self.thread.start()
 
+        # Start timer
+        self.start_time = time.time()
+        self.update_timer()
+
     def stop_recording(self):
         self.recording = False
-        self.recording_event.set()  # Signal the thread to stop
+        self.recording_event.set()
         self.record_button.config(state=tk.NORMAL)
         self.stop_button.config(state=tk.DISABLED)
         if self.speech_recognizer:
             self.speech_recognizer.stop_continuous_recognition_async().get()
+
+        # Display all recognized text
+        self.result_text.delete(1.0, tk.END)
+        self.result_text.insert(tk.END, " ".join(self.recognized_text))
+
+    def update_timer(self):
+        if self.recording:
+            elapsed_time = int(time.time() - self.start_time)
+            self.timer_label.config(text=f"Recording Time: {elapsed_time} seconds")
+            self.root.after(1000, self.update_timer)
+        else:
+            self.timer_label.config(text="Recording stopped.")
 
     def stream_recognition(self):
         selected_mic = self.microphone_var.get()
@@ -101,6 +122,7 @@ class SpeechToTextApp:
 
             def recognized_callback(evt):
                 if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
+                    self.recognized_text.append(evt.result.text)
                     self.result_text.insert(tk.END, evt.result.text + "\n")
                     self.result_text.see(tk.END)
                 elif evt.result.reason == speechsdk.ResultReason.NoMatch:
@@ -120,7 +142,7 @@ class SpeechToTextApp:
                     frames = stream.read(1024)
                     audio_input_stream.write(frames)
 
-                audio_input_stream.close()  # Close the stream when done
+                audio_input_stream.close()
 
             audio_thread = threading.Thread(target=audio_stream)
             audio_thread.start()
@@ -148,7 +170,7 @@ class SpeechToTextApp:
         sentences = sent_tokenize(text)
 
         # Stopwords removal with NLTK
-        stop_words = set(stopwords.words('english'))  # Adjust for Filipino as needed
+        stop_words = set(stopwords.words('english'))
         filtered_tokens = [word for word in tokens if word.lower() not in stop_words]
 
         # Part-of-Speech tagging with spaCy
@@ -158,38 +180,139 @@ class SpeechToTextApp:
         # Sentiment analysis
         sentiment = self.analyze_sentiment(text)
 
-        # Translation to English
-        translation = self.translate_text(text, "en")
+        # Grammar check
+        grammar_errors = self.check_grammar(text)
+
+        # Readability score
+        readability = self.calculate_readability(text)
+
+        # Passive voice detection
+        passive_voice = self.detect_passive_voice(doc)
+
+        # Pronunciation feedback
+        pronunciation_feedback = self.check_pronunciation(tokens)
 
         # Display results in organized manner
         self.result_text.delete(1.0, tk.END)
         self.result_text.insert(tk.END, text)
 
+        # Detailed feedback
         self.sentiment_text.delete(1.0, tk.END)
         self.sentiment_text.insert(tk.END, "=== Sentiment Analysis ===\n")
-        self.sentiment_text.insert(tk.END, f"{json.dumps(sentiment, indent=2)}\n")
+        self.sentiment_text.insert(tk.END, f"Overall Sentiment: {sentiment['documents'][0]['sentiment']}\n")
+        self.sentiment_text.insert(tk.END, "Confidence Scores:\n")
+        for score in sentiment['documents'][0]['confidenceScores']:
+            self.sentiment_text.insert(tk.END, f"{score.capitalize()}: {sentiment['documents'][0]['confidenceScores'][score]:.2f}\n")
+
+        self.sentiment_text.insert(tk.END, "\n=== Analysis Feedback ===\n")
+        self.sentiment_text.insert(tk.END, self.generate_feedback(tokens, filtered_tokens, pos_tags, sentiment, grammar_errors, readability, passive_voice, pronunciation_feedback))
+
+        # Grammar suggestions
+        self.grammar_text.delete(1.0, tk.END)
+        self.grammar_text.insert(tk.END, "=== Original Speech with Suggestions ===\n\n")
+        
+        for sentence in sentences:
+            self.grammar_text.insert(tk.END, sentence + " ")
+            
+            # Add suggestions after each sentence
+            suggestions = self.get_suggestions_for_sentence(sentence)
+            if suggestions:
+                self.grammar_text.insert(tk.END, "\n", "suggestion")
+                for suggestion in suggestions:
+                    self.grammar_text.insert(tk.END, f"Suggestion: {suggestion}\n", "suggestion")
+                self.grammar_text.insert(tk.END, "\n")
+
+    def generate_feedback(self, tokens, filtered_tokens, pos_tags, sentiment, grammar_errors, readability, passive_voice, pronunciation_feedback):
+        feedback = []
+
+        # Clarity: Check for filler words and repetition
+        filler_words = {"uh", "um", "like", "you know", "so", "actually", "basically"}
+        fillers_used = [word for word in tokens if word.lower() in filler_words]
+        if fillers_used:
+            feedback.append(f"Try to reduce the use of filler words like: {', '.join(set(fillers_used))}.")
+
+        # Coherence: Check sentence length and complexity
+        sentence_lengths = [len(sentence.split()) for sentence in sent_tokenize(' '.join(tokens))]
+        avg_sentence_length = sum(sentence_lengths) / len(sentence_lengths)
+        if avg_sentence_length > 20:
+            feedback.append(f"Your sentences are quite long (average {avg_sentence_length:.1f} words). Try to make them shorter and more concise for better clarity.")
+
+        # Vocabulary: Check for diverse vocabulary usage
+        unique_tokens = set(filtered_tokens)
+        if len(unique_tokens) / len(tokens) < 0.5:
+            feedback.append("Consider using a more diverse vocabulary to make your speech more engaging.")
+
+        # Sentiment: Provide feedback based on sentiment analysis
+        overall_sentiment = sentiment['documents'][0]['sentiment']
+        if overall_sentiment == "positive":
+            feedback.append("Your speech has a positive tone. Keep up the positive energy!")
+        elif overall_sentiment == "negative":
+            feedback.append("Your speech has a negative tone. Try to incorporate more positive elements.")
+        else:
+            feedback.append("Your speech has a neutral tone. Consider adding more emotion to engage your audience.")
+
+        # Grammar: Feedback on grammar errors
+        if grammar_errors:
+            feedback.append(f"Grammar errors detected: {', '.join(grammar_errors)}. Consider revising these parts.")
+
+        # Readability: Feedback based on readability score
+        if readability['flesch'] < 60:
+            feedback.append("Your speech is somewhat difficult to read. Simplifying your sentences might help.")
+        if readability['fk_grade'] > 8:
+            feedback.append("Your speech is at a higher grade level. Consider using simpler words for better comprehension.")
+
+        # Passive Voice: Feedback on passive voice usage
+        if passive_voice:
+            feedback.append(f"Consider reducing passive voice usage: {'; '.join(passive_voice)}.")
+
+        # Pronunciation: Feedback on pronunciation (if any issues detected)
+        if pronunciation_feedback:
+            feedback.append(f"Pronunciation issues detected with: {'; '.join(pronunciation_feedback)}.")
+
+        return "\n".join(feedback)
+
+    def check_grammar(self, text):
+        tool = language_tool_python.LanguageTool('en-US')
+        matches = tool.check(text)
+        suggestions = []
+        for match in matches:
+            suggestion = f"{match.ruleId}: {match.message}"
+            if match.replacements:
+                suggestion += f" (suggestion: {', '.join(match.replacements)})"
+            suggestions.append(suggestion)
+        return suggestions
+
+    def calculate_readability(self, text):
+        flesch = flesch_reading_ease(text)
+        fk_grade = flesch_kincaid_grade(text)
+        return {"flesch": flesch, "fk_grade": fk_grade}
+
+    def detect_passive_voice(self, doc):
+        passive_sentences = [sent.text for sent in doc.sents if any(token.dep_ in ("nsubjpass", "auxpass") for token in sent)]
+        return passive_sentences
+
+    def check_pronunciation(self, tokens):
+        # Implement pronunciation checking feature
+        pronunciation_issues = []  # Placeholder implementation
+        return pronunciation_issues
 
     def analyze_sentiment(self, text):
         path = f"{self.endpoint}/text/analytics/v3.0/sentiment"
         headers = {"Ocp-Apim-Subscription-Key": self.subscription_key, "Content-Type": "application/json"}
-        documents = {"documents": [{"id": "1", "language": "en", "text": text}]}
-        response = requests.post(path, headers=headers, json=documents)
-        sentiment = response.json()
-        return sentiment
-
-    def translate_text(self, text, to_language="en"):
-        path = f"{self.endpoint}/translate?api-version=3.0&to={to_language}"
-        headers = {"Ocp-Apim-Subscription-Key": self.subscription_key, "Content-Type": "application/json"}
-        body = [{"text": text}]
+        body = {"documents": [{"id": "1", "language": "en", "text": text}]}
         response = requests.post(path, headers=headers, json=body)
-        response_json = response.json()
-        try:
-            translation = response_json[0]["translations"][0]["text"]
-        except (IndexError, KeyError) as e:
-            translation = "Translation error: " + str(e)
-        return translation
+        return response.json()
 
-if _name_ == "_main_":
-    root = tb.Window(themename="superhero")
+    def get_suggestions_for_sentence(self, sentence):
+        suggestions = []
+        if len(sentence.split()) > 20:
+            suggestions.append("Consider breaking this long sentence into smaller ones for clarity.")
+        if "very" in sentence.lower():
+            suggestions.append("Try using a more specific adjective instead of 'very'.")
+        # Add more suggestion logic as needed
+        return suggestions
+
+if __name__ == "__main__":
+    root = tk.Tk()
     app = SpeechToTextApp(root)
     root.mainloop()
