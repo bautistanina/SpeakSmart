@@ -9,13 +9,14 @@ from nltk.corpus import stopwords
 import spacy
 import requests
 import json
+import language_tool_python
 from ui import create_ui
 from textstat import flesch_reading_ease, flesch_kincaid_grade
 import time
 
 # Initialize NLTK resources
-nltk.download('punkt')
-nltk.download('stopwords')
+# nltk.download('punkt')
+# nltk.download('stopwords')
 
 # Load spaCy language model
 nlp = spacy.load("en_core_web_sm")
@@ -28,7 +29,7 @@ class SpeechToTextApp:
         # Initialize UI components
         create_ui(self)
 
-       # Initialize Azure services
+        # Initialize Azure services
         self.subscription_key = "cc0a8666c9de495499d5fd54a205ad8c"
         self.endpoint = "https://speaksmart.cognitiveservices.azure.com/"
         self.region = "southeastasia"
@@ -206,6 +207,21 @@ class SpeechToTextApp:
         self.sentiment_text.insert(tk.END, "\n=== Analysis Feedback ===\n")
         self.sentiment_text.insert(tk.END, self.generate_feedback(tokens, filtered_tokens, pos_tags, sentiment, grammar_errors, readability, passive_voice, pronunciation_feedback))
 
+        # Grammar suggestions
+        self.grammar_text.delete(1.0, tk.END)
+        self.grammar_text.insert(tk.END, "=== Original Speech with Suggestions ===\n\n")
+        
+        for sentence in sentences:
+            self.grammar_text.insert(tk.END, sentence + " ")
+            
+            # Add suggestions after each sentence
+            suggestions = self.get_suggestions_for_sentence(sentence)
+            if suggestions:
+                self.grammar_text.insert(tk.END, "\n", "suggestion")
+                for suggestion in suggestions:
+                    self.grammar_text.insert(tk.END, f"Suggestion: {suggestion}\n", "suggestion")
+                self.grammar_text.insert(tk.END, "\n")
+
     def generate_feedback(self, tokens, filtered_tokens, pos_tags, sentiment, grammar_errors, readability, passive_voice, pronunciation_feedback):
         feedback = []
 
@@ -256,9 +272,15 @@ class SpeechToTextApp:
         return "\n".join(feedback)
 
     def check_grammar(self, text):
-        # Integrate a grammar checking API like Grammarly or LanguageTool
-        grammar_errors = []  # Placeholder implementation
-        return grammar_errors
+        tool = language_tool_python.LanguageTool('en-US')
+        matches = tool.check(text)
+        suggestions = []
+        for match in matches:
+            suggestion = f"{match.ruleId}: {match.message}"
+            if match.replacements:
+                suggestion += f" (suggestion: {', '.join(match.replacements)})"
+            suggestions.append(suggestion)
+        return suggestions
 
     def calculate_readability(self, text):
         flesch = flesch_reading_ease(text)
@@ -280,6 +302,15 @@ class SpeechToTextApp:
         body = {"documents": [{"id": "1", "language": "en", "text": text}]}
         response = requests.post(path, headers=headers, json=body)
         return response.json()
+
+    def get_suggestions_for_sentence(self, sentence):
+        suggestions = []
+        if len(sentence.split()) > 20:
+            suggestions.append("Consider breaking this long sentence into smaller ones for clarity.")
+        if "very" in sentence.lower():
+            suggestions.append("Try using a more specific adjective instead of 'very'.")
+        # Add more suggestion logic as needed
+        return suggestions
 
 if __name__ == "__main__":
     root = tk.Tk()
