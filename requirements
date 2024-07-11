@@ -1,0 +1,10 @@
+azure-cognitiveservices-speech
+pyaudio
+nltk
+spacy
+requests
+language_tool_python
+transformers
+scikit-learn
+textstat
+torch  # Or tensorflow, depending on your preference
